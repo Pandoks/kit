@@ -903,6 +903,111 @@ test.describe('Prefetching', () => {
 		await app.goto('/routing/preloading/preload-error');
 		await expect(page.locator('p')).toHaveText('hello');
 	});
+
+	test('preloading multiple routes does not evict earlier preloads', async ({ app, page }) => {
+		await page.goto('/routing/preloading/persist/hub');
+
+		await app.preloadData('/routing/preloading/persist/route-a');
+		await app.preloadData('/routing/preloading/persist/route-b');
+		await app.preloadData('/routing/preloading/persist/route-c');
+
+		await app.goto('/routing/preloading/persist/route-a');
+		await expect(page.getByTestId('load-calls')).toHaveText('1');
+
+		await app.goto('/routing/preloading/persist/hub');
+		await app.goto('/routing/preloading/persist/route-c');
+		await expect(page.getByTestId('load-calls')).toHaveText('1');
+
+		// Route B's preload wasn't evicted by the later preloads of A and C
+		await app.goto('/routing/preloading/persist/hub');
+		await app.goto('/routing/preloading/persist/route-b');
+		await expect(page.getByTestId('load-calls')).toHaveText('1');
+	});
+
+	test('preloaded prerendered routes are reused on return navigation', async ({ app, page }) => {
+		await page.goto('/routing/preloading/persist/hub');
+
+		await app.preloadData('/routing/preloading/persist/prerendered');
+		await app.goto('/routing/preloading/persist/prerendered');
+		await expect(page.getByTestId('load-calls')).toHaveText('1');
+
+		await app.goto('/routing/preloading/persist/hub');
+		await app.goto('/routing/preloading/persist/prerendered');
+		// Prerendered data is immutable; the cached entry should be reused
+		await expect(page.getByTestId('load-calls')).toHaveText('1');
+	});
+
+	test('mutations to data in a component do not persist across navigations', async ({
+		app,
+		page
+	}) => {
+		await page.goto('/routing/preloading/persist/hub');
+
+		await app.goto('/routing/preloading/persist/mutation');
+		await expect(page.getByTestId('mutations')).toHaveText('1');
+
+		await app.goto('/routing/preloading/persist/hub');
+		await app.goto('/routing/preloading/persist/mutation');
+		// If the cached data object were reused, the mutation from the first visit
+		// would leak and this would render '2'
+		await expect(page.getByTestId('mutations')).toHaveText('1');
+	});
+
+	test('preloading a non-prerendered route again after consumption reruns load', async ({
+		app,
+		page
+	}) => {
+		await page.goto('/routing/preloading/persist/hub');
+
+		await app.preloadData('/routing/preloading/persist/ssr');
+		await app.goto('/routing/preloading/persist/ssr');
+		await expect(page.getByTestId('load-calls')).toHaveText('1');
+
+		await app.goto('/routing/preloading/persist/hub');
+
+		// Second preload of a consumed non-prerendered entry should refresh, not reuse
+		await app.preloadData('/routing/preloading/persist/ssr');
+		await app.goto('/routing/preloading/persist/ssr');
+		await expect(page.getByTestId('load-calls')).toHaveText('2');
+	});
+
+	test('direct navigation to a non-prerendered route reruns load after consumption', async ({
+		app,
+		page
+	}) => {
+		await page.goto('/routing/preloading/persist/hub');
+
+		await app.preloadData('/routing/preloading/persist/ssr');
+		await app.goto('/routing/preloading/persist/ssr');
+		await expect(page.getByTestId('load-calls')).toHaveText('1');
+
+		await app.goto('/routing/preloading/persist/hub');
+
+		// Direct navigation (no preload) must not reuse a consumed non-prerendered entry
+		await app.goto('/routing/preloading/persist/ssr');
+		await expect(page.getByTestId('load-calls')).toHaveText('2');
+	});
+
+	test('invalidate clears preloaded prerendered cache entries', async ({ app, page }) => {
+		await page.goto('/routing/preloading/persist/hub');
+
+		await app.preloadData('/routing/preloading/persist/prerendered');
+		await app.goto('/routing/preloading/persist/prerendered');
+		await expect(page.getByTestId('load-calls')).toHaveText('1');
+
+		// invalidate must clear the cache even for prerendered routes.
+		// A match-all predicate exercises the same `_invalidate` / `discard_load_cache`
+		// path that `invalidateAll()` triggers.
+		await page.evaluate(() => {
+			// @ts-expect-error — invalidate is exposed as a global by the test layout
+			return invalidate(() => true);
+		});
+
+		await app.goto('/routing/preloading/persist/hub');
+		await app.goto('/routing/preloading/persist/prerendered');
+		// If invalidate cleared the cache, load runs again
+		await expect(page.getByTestId('load-calls')).toHaveText('2');
+	});
 });
 
 test.describe('Routing', () => {

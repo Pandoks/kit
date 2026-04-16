@@ -29,6 +29,13 @@ export interface SvelteKitApp {
 	server_loads: number[];
 
 	/**
+	 * Route IDs that declared `prerender = true`. Their `__data.json` is immutable
+	 * per build, so the client can keep preloaded cache entries for these routes
+	 * across navigations.
+	 */
+	prerendered_routes: string[];
+
+	/**
 	 * A map of `[routeId: string]: [leaf, layouts, errors]` tuples, which
 	 * is parsed into an array of routes on startup. The numbers refer to the indices in `nodes`.
 	 * If the leaf number is negative, it means it does use a server load function and the complement is the node index.
