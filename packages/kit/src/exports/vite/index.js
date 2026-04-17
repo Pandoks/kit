@@ -1122,7 +1122,7 @@ async function kit({ svelte_config }) {
 					kit,
 					manifest_data,
 					`${kit.outDir}/generated/client-optimized`,
-					metadata.nodes
+					metadata
 				);
 
 				secondary_build_started = true;

@@ -10,7 +10,7 @@ import colors from 'kleur';
  * @param {import('types').ValidatedKitConfig} kit
  * @param {import('types').ManifestData} manifest_data
  * @param {string} output
- * @param {import('types').ServerMetadata['nodes']} [metadata] If this is omitted, we have to assume that all routes with a `+layout/page.server.js` file have a server load function
+ * @param {import('types').ServerMetadata} [metadata] If this is omitted, we have to assume that all routes with a `+layout/page.server.js` file have a server load function
  */
 export function write_client_manifest(kit, manifest_data, output, metadata) {
 	const client_routing = kit.router.resolution === 'client';
@@ -72,7 +72,7 @@ export function write_client_manifest(kit, manifest_data, output, metadata) {
 							if (metadata) {
 								const i = /** @type {number} */ (indices.get(route.leaf));
 
-								leaf_has_server_load = metadata[i].has_server_load;
+								leaf_has_server_load = metadata.nodes[i].has_server_load;
 							} else if (route.leaf.server) {
 								leaf_has_server_load = true;
 							}
@@ -91,7 +91,7 @@ export function write_client_manifest(kit, manifest_data, output, metadata) {
 							let layout_has_server_load = false;
 
 							if (metadata) {
-								layout_has_server_load = metadata[layout].has_server_load;
+								layout_has_server_load = metadata.nodes[layout].has_server_load;
 							} else if (manifest_data.nodes[layout].server) {
 								layout_has_server_load = true;
 							}
@@ -119,6 +119,16 @@ export function write_client_manifest(kit, manifest_data, output, metadata) {
 		layouts_with_server_load.clear();
 		if (root_layout) layouts_with_server_load.add(0);
 	}
+
+	// Routes that declared `prerender = true` — their __data.json is immutable per build,
+	// so the client can keep preload cache entries for them across navigations.
+	// Sorted for deterministic manifest output across builds.
+	const prerendered_routes = metadata
+		? [...metadata.routes.entries()]
+				.filter(([, route_metadata]) => route_metadata.prerender === true)
+				.map(([id]) => id)
+				.sort()
+		: [];
 
 	const client_hooks_file = resolve_entry(kit.files.hooks.client);
 	const universal_hooks_file = resolve_entry(kit.files.hooks.universal);
@@ -158,6 +168,8 @@ export function write_client_manifest(kit, manifest_data, output, metadata) {
 			];
 
 			export const server_loads = [${[...layouts_with_server_load].join(',')}];
+
+			export const prerendered_routes = ${s(prerendered_routes)};
 
 			export const dictionary = ${dictionary};
 

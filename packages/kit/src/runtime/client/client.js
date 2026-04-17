@@ -222,12 +222,36 @@ const invalidated = [];
  */
 const components = [];
 
-/** @type {{id: string, token: {}, promise: Promise<import('./types.js').NavigationResult>, fork: Promise<import('svelte').Fork | null> | null} | null} */
-let load_cache = null;
+/** @type {Map<string, {id: string, token: {}, promise: Promise<import('./types.js').NavigationResult>, fork: Promise<import('svelte').Fork | null> | null, consumed: boolean}>} */
+let load_cache = new Map();
 
-function discard_load_cache() {
-	void load_cache?.fork?.then((f) => f?.discard());
-	load_cache = null;
+/** @type {Set<string>} Route IDs with `prerender = true`, constructed from `app.prerendered_routes` at startup */
+let prerendered_routes;
+
+function discard_load_cache(id) {
+	if (id) {
+		const entry = load_cache.get(id);
+		if (entry) {
+			void entry.fork?.then((f) => f?.discard());
+			load_cache.delete(id);
+		}
+	} else {
+		for (const entry of load_cache.values()) {
+			void entry.fork?.then((f) => f?.discard());
+		}
+		load_cache.clear();
+	}
+}
+
+/**
+ * A consumed cache entry needs to be refreshed only if the route may have changed
+ * server-side. Prerendered routes are immutable per build, so their entries can
+ * be reused indefinitely.
+ * @param {{ consumed: boolean }} entry
+ * @param {{ id: string }} route
+ */
+function should_refresh_entry(entry, route) {
+	return entry.consumed && !prerendered_routes.has(route.id);
 }
 
 /**
@@ -331,6 +355,7 @@ export async function start(_app, _target, hydrate) {
 	}
 
 	app = _app;
+	prerendered_routes = new Set(_app.prerendered_routes);
 
 	await _app.hooks.init?.();
 
@@ -540,36 +565,34 @@ export async function _goto(url, options, redirect_count, nav_token) {
 
 /** @param {import('./types.js').NavigationIntent} intent */
 async function _preload_data(intent) {
-	// Reuse the existing pending preload if it's for the same navigation.
-	// Prevents an edge case where same preload is triggered multiple times,
-	// then a later one is becoming the real navigation and the preload tokens
-	// get out of sync.
-	if (intent.id !== load_cache?.id) {
-		discard_load_cache();
-
+	// Reuse pending or unconsumed preloads to avoid duplicate fetches.
+	// Refresh consumed entries only for non-prerendered routes (prerendered data is immutable).
+	const existing = load_cache.get(intent.id);
+	if (!existing || should_refresh_entry(existing, intent.route)) {
+		if (existing) discard_load_cache(intent.id);
 		const preload = {};
 		preload_tokens.add(preload);
-		load_cache = {
+		const entry = {
 			id: intent.id,
 			token: preload,
 			promise: load_route({ ...intent, preload }).then((result) => {
 				preload_tokens.delete(preload);
 				if (result.type === 'loaded' && result.state.error) {
 					// Don't cache errors, because they might be transient
-					discard_load_cache();
+					discard_load_cache(intent.id);
 				}
 				return result;
 			}),
-			fork: null
+			fork: null,
+			consumed: false
 		};
+		load_cache.set(intent.id, entry);
 
 		if (__SVELTEKIT_FORK_PRELOADS__ && svelte.fork) {
-			const lc = load_cache;
-
-			lc.fork = lc.promise.then((result) => {
-				// if load_cache was discarded before load_cache.promise could
+			entry.fork = entry.promise.then((result) => {
+				// if load_cache was discarded before promise could
 				// resolve, bail rather than creating an orphan fork
-				if (lc === load_cache && result.type === 'loaded') {
+				if (load_cache.get(intent.id) === entry && result.type === 'loaded') {
 					try {
 						return svelte.fork(() => {
 							root.$set(result.props);
@@ -585,7 +608,7 @@ async function _preload_data(intent) {
 		}
 	}
 
-	return load_cache.promise;
+	return load_cache.get(intent.id).promise;
 }
 
 /**
@@ -1104,10 +1127,15 @@ function preload_error({ error, url, route, params }) {
  * @returns {Promise<import('./types.js').NavigationResult>}
  */
 async function load_route({ id, invalidating, url, params, route, preload }) {
-	if (load_cache?.id === id) {
-		// the preload becomes the real navigation
-		preload_tokens.delete(load_cache.token);
-		return load_cache.promise;
+	if (load_cache.has(id)) {
+		const cached = load_cache.get(id);
+		// Consumed entries for non-prerendered routes may be stale — discard and refetch
+		if (should_refresh_entry(cached, route)) {
+			discard_load_cache(id);
+		} else {
+			preload_tokens.delete(cached.token);
+			return cached.promise;
+		}
 	}
 
 	const { errors, layouts, leaf } = route;
@@ -1784,13 +1812,13 @@ async function navigate({
 	}
 
 	// also compare ids to avoid using wrong fork (e.g. a new one could've been added while navigating)
-	const load_cache_fork = intent && load_cache?.id === intent.id ? load_cache.fork : null;
-	// reset preload synchronously after the history state has been set to avoid race conditions
-	if (load_cache?.fork && !load_cache_fork) {
-		// discard fork of different route
-		discard_load_cache();
+	const cached_entry = intent ? load_cache.get(intent.id) : null;
+	const load_cache_fork = cached_entry?.fork ?? null;
+	// Replace the entry rather than mutating it — any pending fork closures
+	// compare against the original reference and will bail gracefully.
+	if (cached_entry) {
+		load_cache.set(intent.id, { ...cached_entry, fork: null, consumed: true });
 	}
-	load_cache = null;
 
 	navigation_result.props.page.state = state;
 
